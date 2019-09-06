@@ -33,6 +33,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <time.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -219,6 +221,7 @@ struct {
     int raise_rts;
     int raise_dtr;
     int quiet;
+    int timestamp;
 } opts = {
     .port = NULL,
     .baud = 9600,
@@ -248,7 +251,8 @@ struct {
     .lower_dtr = 0,
     .raise_rts = 0,
     .raise_dtr = 0,
-    .quiet = 0
+    .quiet = 0,
+    .timestamp = 0,
 };
 
 int sig_exit = 0;
@@ -728,6 +732,46 @@ fatal (const char *format, ...)
 
 /**********************************************************************/
 
+#define MAXTIMESTAMP 64
+
+int
+timestamp (char **b)
+{
+    static char buf[MAXTIMESTAMP];
+    struct timeval tv;
+    time_t nowtime;
+    struct tm *nowtm;
+    gettimeofday(&tv, NULL);
+    nowtime = tv.tv_sec;
+    nowtm = localtime(&nowtime);
+    strftime(buf, sizeof(buf), "[%Y-%m-%d %H:%M:%S", nowtm);
+    snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), ".%03ld]", tv.tv_usec/1000);
+    *b = buf;
+    return strlen(buf);
+}
+
+ssize_t
+timestamp_writen_ni (int fd, const void *buff, size_t n, int *printnext)
+{
+    if (!opts.timestamp)
+        return writen_ni(fd, buff, n);
+
+    ssize_t ret = 0;
+    const char *bufc = buff;
+    for (size_t i = 0; i < n; i++) {
+        if (*printnext) {
+            *printnext = 0;
+            char *dts;
+            int dtn = timestamp(&dts);
+            writen_ni(fd, dts, dtn);
+        }
+        *printnext = bufc[i] == '\n';
+        ret += writen_ni(fd, &bufc[i], 1);
+    }
+    return ret;
+}
+
+/**********************************************************************/
 /* maximum number of chars that can replace a single characted
    due to mapping */
 #define M_MAXMAP 4
@@ -1414,6 +1458,7 @@ loop(void)
     fd_set rdset, wrset;
     int r, n;
     int stdin_closed;
+    int timestamp_printnext_sto = 1, timestamp_printnext_log = 1;
 
     state = ST_TRANSPARENT;
     if ( ! opts.exit )
@@ -1525,13 +1570,13 @@ loop(void)
                 int i;
                 char *bmp = &buff_map[0];
                 if ( opts.log_filename )
-                    if ( writen_ni(log_fd, buff_rd, n) < n )
+                    if ( timestamp_writen_ni(log_fd, buff_rd, n, &timestamp_printnext_log) < n )
                         fatal("write to logfile failed: %s", strerror(errno));
                 for (i = 0; i < n; i++) {
                     bmp += do_map(bmp, opts.imap, buff_rd[i]);
                 }
                 n = bmp - buff_map;
-                if ( writen_ni(STO, buff_map, n) < n )
+                if ( timestamp_writen_ni(STO, buff_map, n, &timestamp_printnext_sto) < n )
                     fatal("write to stdout failed: %s", strerror(errno));
             }
         }
@@ -1657,6 +1702,7 @@ show_usage(char *name)
     printf("  --raise-rts\n");
     printf("  --lower-dtr\n");
     printf("  --raise-dtr\n");
+    printf("  --<T>imestamp\n");
     printf("  --<q>uiet\n");
     printf("  --<h>elp\n");
     printf("<map> is a comma-separated list of one or more of:\n");
@@ -1717,6 +1763,7 @@ parse_args(int argc, char *argv[])
         {"raise-rts", no_argument, 0, 3},
         {"raise-dtr", no_argument, 0, 4},
         {"quiet", no_argument, 0, 'q'},
+        {"timestamp", no_argument, 0, 'T'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -1731,7 +1778,7 @@ parse_args(int argc, char *argv[])
         /* no default error messages printed. */
         opterr = 0;
 
-        c = getopt_long(argc, argv, "hirulcqXnv:s:r:e:f:b:y:d:p:g:t:x:",
+        c = getopt_long(argc, argv, "ThirulcqXnv:s:r:e:f:b:y:d:p:g:t:x:",
                         longOptions, &optionIndex);
 
         if (c < 0)
@@ -1908,6 +1955,9 @@ parse_args(int argc, char *argv[])
             break;
         case 'q':
             opts.quiet = 1;
+            break;
+        case 'T':
+            opts.timestamp = 1;
             break;
         case 'h':
             show_usage(argv[0]);
